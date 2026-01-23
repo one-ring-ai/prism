@@ -34,7 +34,7 @@ readonly class StreamStartEvent extends StreamEvent
     {
         return [
             'id' => $this->id,
-            'messageId' => $this->messageId,
+            'message_id' => $this->messageId,
             'timestamp' => $this->timestamp,
             'model' => $this->model,
             'provider' => $this->provider,
