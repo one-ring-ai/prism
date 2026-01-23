@@ -71,6 +71,8 @@ class Stream
 
         $text = '';
         $toolCalls = [];
+        $providerMessageId = '';
+        $providerResponse = [];
 
         while (! $response->getBody()->eof()) {
             $data = $this->parseNextDataLine($response->getBody());
@@ -84,11 +86,17 @@ class Stream
                     ->withMessageId(EventID::generate('msg'))
                     ->markStreamStarted();
 
+                $providerMessageId = $data['id'];
+
                 yield new StreamStartEvent(
                     id: EventID::generate(),
                     timestamp: time(),
                     model: $data['model'] ?? $request->model(),
-                    provider: 'openrouter'
+                    provider: 'openrouter',
+                    metadata: [
+                        'provider_message_id' => $data['id'],
+                    ],
+                    messageId: $this->state->messageId()
                 );
             }
 
@@ -224,11 +232,16 @@ class Stream
             }
         }
 
+        $providerResponse = $this->parseNextDataLine($response->getBody());
         yield new StreamEndEvent(
             id: EventID::generate(),
             timestamp: time(),
             finishReason: $this->state->finishReason() ?? FinishReason::Stop,
-            usage: $this->state->usage()
+            usage: $this->state->usage(),
+            additionalContent: [
+                'provider_message_id' => $providerMessageId,
+                'provider_data' => $providerResponse,
+            ]
         );
     }
 
