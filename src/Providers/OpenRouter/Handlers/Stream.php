@@ -230,9 +230,10 @@ class Stream
                     $this->state->addUsage($usage);
                 }
             }
+            $providerResponse = $this->parseNextDataLine($response->getBody());
+            $providerMessageId = $data['id'] ?? null;
         }
 
-        $providerResponse = $this->parseNextDataLine($response->getBody());
         yield new StreamEndEvent(
             id: EventID::generate(),
             timestamp: time(),
