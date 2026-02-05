@@ -7,6 +7,7 @@ namespace Prism\Prism\Providers\OpenRouter\Handlers;
 use Generator;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\FinishReason;
@@ -78,6 +79,10 @@ class Stream
         while (! $response->getBody()->eof()) {
             $data = $this->parseNextDataLine($response->getBody());
 
+            Log::debug('Provider Data', [
+                'data' => $data,
+            ]);
+
             if ($data === null) {
                 continue;
             }
@@ -87,7 +92,7 @@ class Stream
                     ->withMessageId(EventID::generate('msg'))
                     ->markStreamStarted();
 
-                $providerMessageId = $data['id'];
+                $providerMessageId = $data['id'] ?? null;
 
                 yield new StreamStartEvent(
                     id: EventID::generate(),
@@ -95,7 +100,7 @@ class Stream
                     model: $data['model'] ?? $request->model(),
                     provider: 'openrouter',
                     metadata: [
-                        'provider_message_id' => $data['id'],
+                        'provider_message_id' => $providerMessageId,
                     ],
                     messageId: $this->state->messageId()
                 );
@@ -258,10 +263,10 @@ class Stream
             timestamp: time()
         );
 
-        yield $this->emitStreamEndEvent();
+        yield $this->emitStreamEndEvent($providerResponse, $providerMessageId);
     }
 
-    protected function emitStreamEndEvent(): StreamEndEvent
+    protected function emitStreamEndEvent(?array $providerResponse, ?string $providerMessageId): StreamEndEvent
     {
         return new StreamEndEvent(
             id: EventID::generate(),
