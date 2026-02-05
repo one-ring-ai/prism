@@ -7,7 +7,6 @@ namespace Prism\Prism\Providers\OpenRouter\Handlers;
 use Generator;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
-use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\FinishReason;
@@ -78,10 +77,6 @@ class Stream
 
         while (! $response->getBody()->eof()) {
             $data = $this->parseNextDataLine($response->getBody());
-
-            Log::debug('Provider Data', [
-                'data' => $data,
-            ]);
 
             if ($data === null) {
                 continue;
