@@ -6,6 +6,7 @@ namespace Prism\Prism\Concerns;
 
 use Illuminate\Support\ItemNotFoundException;
 use Illuminate\Support\MultipleItemsFoundException;
+use Illuminate\Support\Str;
 use Prism\Prism\Exceptions\PrismException;
 use Prism\Prism\Tool;
 use Prism\Prism\ValueObjects\ToolCall;
@@ -58,7 +59,7 @@ trait CallsTools
     {
         try {
             return collect($tools)
-                ->sole(fn (Tool $tool): bool => $tool->name() === $name);
+                ->sole(fn (Tool $tool): bool => Str::lower($tool->name()) === Str::lower(Str::trim($name)));
         } catch (ItemNotFoundException $e) {
             throw PrismException::toolNotFound($name, $e);
         } catch (MultipleItemsFoundException $e) {
