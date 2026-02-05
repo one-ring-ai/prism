@@ -17,6 +17,8 @@ use Prism\Prism\Streaming\EventID;
 use Prism\Prism\Streaming\Events\CitationEvent;
 use Prism\Prism\Streaming\Events\ErrorEvent;
 use Prism\Prism\Streaming\Events\ProviderToolEvent;
+use Prism\Prism\Streaming\Events\StepFinishEvent;
+use Prism\Prism\Streaming\Events\StepStartEvent;
 use Prism\Prism\Streaming\Events\StreamEndEvent;
 use Prism\Prism\Streaming\Events\StreamEvent;
 use Prism\Prism\Streaming\Events\StreamStartEvent;
@@ -28,14 +30,12 @@ use Prism\Prism\Streaming\Events\ThinkingEvent;
 use Prism\Prism\Streaming\Events\ThinkingStartEvent;
 use Prism\Prism\Streaming\Events\ToolCallDeltaEvent;
 use Prism\Prism\Streaming\Events\ToolCallEvent;
-use Prism\Prism\Streaming\Events\ToolResultEvent;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Citation;
 use Prism\Prism\ValueObjects\MessagePartWithCitations;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
 use Prism\Prism\ValueObjects\Messages\ToolResultMessage;
 use Prism\Prism\ValueObjects\ToolCall;
-use Prism\Prism\ValueObjects\ToolResult;
 use Prism\Prism\ValueObjects\Usage;
 use Psr\Http\Message\StreamInterface;
 use Throwable;
@@ -77,17 +77,27 @@ class Stream
             $streamEvent = $this->processEvent($event);
 
             if ($streamEvent instanceof Generator) {
-                yield from $streamEvent;
+                foreach ($streamEvent as $event) {
+                    yield $event;
+                }
             } elseif ($streamEvent instanceof StreamEvent) {
                 yield $streamEvent;
             }
         }
 
         if ($this->state->hasToolCalls()) {
-            yield from $this->handleToolCalls($request, $depth);
+            foreach ($this->handleToolCalls($request, $depth) as $item) {
+                yield $item;
+            }
 
             return;
         }
+
+        $this->state->markStepFinished();
+        yield new StepFinishEvent(
+            id: EventID::generate(),
+            timestamp: time()
+        );
 
         yield $this->emitStreamEndEvent();
     }
@@ -113,8 +123,9 @@ class Stream
 
     /**
      * @param  array<string, mixed>  $event
+     * @return Generator<StreamEvent>
      */
-    protected function handleMessageStart(array $event): ?StreamStartEvent
+    protected function handleMessageStart(array $event): Generator
     {
         $message = $event['message'] ?? [];
         $this->state->withMessageId($message['id'] ?? EventID::generate());
@@ -130,18 +141,25 @@ class Stream
         }
 
         // Only emit StreamStartEvent once per streaming session
-        if (! $this->state->shouldEmitStreamStart()) {
-            return null;
+        if ($this->state->shouldEmitStreamStart()) {
+            $this->state->markStreamStarted();
+
+            yield new StreamStartEvent(
+                id: EventID::generate(),
+                timestamp: time(),
+                model: $message['model'] ?? 'unknown',
+                provider: 'anthropic'
+            );
         }
 
-        $this->state->markStreamStarted();
+        if ($this->state->shouldEmitStepStart()) {
+            $this->state->markStepStarted();
 
-        return new StreamStartEvent(
-            id: EventID::generate(),
-            timestamp: time(),
-            model: $message['model'] ?? 'unknown',
-            provider: 'anthropic'
-        );
+            yield new StepStartEvent(
+                id: EventID::generate(),
+                timestamp: time()
+            );
+        }
     }
 
     /**
@@ -195,11 +213,7 @@ class Stream
     protected function handleContentBlockStop(array $event): ?StreamEvent
     {
         $result = match ($this->state->currentBlockType()) {
-            'text' => new TextCompleteEvent(
-                id: EventID::generate(),
-                timestamp: time(),
-                messageId: $this->state->messageId()
-            ),
+            'text' => $this->handleTextComplete(),
             'thinking' => new ThinkingCompleteEvent(
                 id: EventID::generate(),
                 timestamp: time(),
@@ -241,7 +255,7 @@ class Stream
      */
     protected function handleMessageStop(array $event): ?StreamEndEvent
     {
-        if (! $this->state->finishReason() instanceof \Prism\Prism\Enums\FinishReason) {
+        if (! $this->state->finishReason() instanceof FinishReason) {
             $this->state->withFinishReason(FinishReason::Stop);
         }
 
@@ -258,6 +272,7 @@ class Stream
             citations: $this->state->citations() !== [] ? $this->state->citations() : null,
             additionalContent: [
                 'thinking' => $this->state->thinkingSummaries() === [] ? null : implode('', $this->state->thinkingSummaries()),
+                'thinking_signature' => $this->state->currentThinkingSignature() === '' ? null : $this->state->currentThinkingSignature(),
             ]
         );
     }
@@ -284,6 +299,17 @@ class Stream
             id: EventID::generate(),
             timestamp: time(),
             reasoningId: $this->state->reasoningId()
+        );
+    }
+
+    protected function handleTextComplete(): TextCompleteEvent
+    {
+        $this->state->markTextCompleted();
+
+        return new TextCompleteEvent(
+            id: EventID::generate(),
+            timestamp: time(),
+            messageId: $this->state->messageId()
         );
     }
 
@@ -473,48 +499,17 @@ class Stream
 
         // Execute tools and emit results
         $toolResults = [];
-        foreach ($toolCalls as $toolCall) {
-            try {
-                $tool = $this->resolveTool($toolCall->name, $request->tools());
-                $result = call_user_func_array($tool->handle(...), $toolCall->arguments());
-
-                $toolResult = new ToolResult(
-                    toolCallId: $toolCall->id,
-                    toolName: $toolCall->name,
-                    args: $toolCall->arguments(),
-                    result: $result
-                );
-
-                $toolResults[] = $toolResult;
-
-                yield new ToolResultEvent(
-                    id: EventID::generate(),
-                    timestamp: time(),
-                    toolResult: $toolResult,
-                    messageId: $this->state->messageId(),
-                    success: true
-                );
-            } catch (Throwable $e) {
-                $errorResultObj = new ToolResult(
-                    toolCallId: $toolCall->id,
-                    toolName: $toolCall->name,
-                    args: $toolCall->arguments(),
-                    result: []
-                );
-
-                yield new ToolResultEvent(
-                    id: EventID::generate(),
-                    timestamp: time(),
-                    toolResult: $errorResultObj,
-                    messageId: $this->state->messageId(),
-                    success: false,
-                    error: $e->getMessage()
-                );
-            }
-        }
+        yield from $this->callToolsAndYieldEvents($request->tools(), $toolCalls, $this->state->messageId(), $toolResults);
 
         // Add messages to request for next turn
         if ($toolResults !== []) {
+            // Emit step finish after tool calls
+            $this->state->markStepFinished();
+            yield new StepFinishEvent(
+                id: EventID::generate(),
+                timestamp: time()
+            );
+
             $request->addMessage(new AssistantMessage(
                 content: $this->state->currentText(),
                 toolCalls: $toolCalls,
@@ -525,6 +520,7 @@ class Stream
             ));
 
             $request->addMessage(new ToolResultMessage($toolResults));
+            $request->resetToolChoice();
 
             // Continue streaming if within step limit
             $depth++;
@@ -532,6 +528,8 @@ class Stream
                 $this->state->reset();
                 $nextResponse = $this->sendRequest($request);
                 yield from $this->processStream($nextResponse, $request, $depth);
+            } else {
+                yield $this->emitStreamEndEvent();
             }
         }
     }

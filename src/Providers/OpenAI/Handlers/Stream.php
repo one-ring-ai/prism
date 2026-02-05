@@ -21,6 +21,8 @@ use Prism\Prism\Providers\OpenAI\Maps\MessageMap;
 use Prism\Prism\Providers\OpenAI\Maps\ToolChoiceMap;
 use Prism\Prism\Streaming\EventID;
 use Prism\Prism\Streaming\Events\ProviderToolEvent;
+use Prism\Prism\Streaming\Events\StepFinishEvent;
+use Prism\Prism\Streaming\Events\StepStartEvent;
 use Prism\Prism\Streaming\Events\StreamEndEvent;
 use Prism\Prism\Streaming\Events\StreamEvent;
 use Prism\Prism\Streaming\Events\StreamStartEvent;
@@ -32,7 +34,6 @@ use Prism\Prism\Streaming\Events\ThinkingEvent;
 use Prism\Prism\Streaming\Events\ThinkingStartEvent;
 use Prism\Prism\Streaming\Events\ToolCallDeltaEvent;
 use Prism\Prism\Streaming\Events\ToolCallEvent;
-use Prism\Prism\Streaming\Events\ToolResultEvent;
 use Prism\Prism\Streaming\StreamState;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
@@ -107,6 +108,15 @@ class Stream
                 $this->state->markStreamStarted();
 
                 continue;
+            }
+
+            if ($this->state->shouldEmitStepStart()) {
+                $this->state->markStepStarted();
+
+                yield new StepStartEvent(
+                    id: EventID::generate(),
+                    timestamp: time()
+                );
             }
 
             if ($this->hasReasoningSummaryDelta($data)) {
@@ -235,6 +245,8 @@ class Stream
             }
 
             if (data_get($data, 'type') === 'response.output_text.done' && $this->state->hasTextStarted()) {
+                $this->state->markTextCompleted();
+
                 yield new TextCompleteEvent(
                     id: EventID::generate(),
                     timestamp: time(),
@@ -260,7 +272,18 @@ class Stream
             return;
         }
 
-        yield new StreamEndEvent(
+        $this->state->markStepFinished();
+        yield new StepFinishEvent(
+            id: EventID::generate(),
+            timestamp: time()
+        );
+
+        yield $this->emitStreamEndEvent();
+    }
+
+    protected function emitStreamEndEvent(): StreamEndEvent
+    {
+        return new StreamEndEvent(
             id: EventID::generate(),
             timestamp: time(),
             finishReason: $this->state->finishReason() ?? FinishReason::Stop,
@@ -372,19 +395,19 @@ class Stream
     protected function handleToolCalls(Request $request, int $depth): Generator
     {
         $mappedToolCalls = $this->mapToolCalls($this->state->toolCalls());
-        $toolResults = $this->callTools($request->tools(), $mappedToolCalls);
+        $toolResults = [];
+        yield from $this->callToolsAndYieldEvents($request->tools(), $mappedToolCalls, $this->state->messageId(), $toolResults);
 
-        foreach ($toolResults as $result) {
-            yield new ToolResultEvent(
-                id: EventID::generate(),
-                timestamp: time(),
-                toolResult: $result,
-                messageId: EventID::generate()
-            );
-        }
+        // Emit step finish after tool calls
+        $this->state->markStepFinished();
+        yield new StepFinishEvent(
+            id: EventID::generate(),
+            timestamp: time()
+        );
 
         $request->addMessage(new AssistantMessage($this->state->currentText(), $mappedToolCalls));
         $request->addMessage(new ToolResultMessage($toolResults));
+        $request->resetToolChoice();
 
         $depth++;
 
@@ -392,6 +415,8 @@ class Stream
             $nextResponse = $this->sendRequest($request);
 
             yield from $this->processStream($nextResponse, $request, $depth);
+        } else {
+            yield $this->emitStreamEndEvent();
         }
     }
 
@@ -412,7 +437,7 @@ class Stream
                 reasoningId: data_get($toolCall, 'reasoning_id'),
                 reasoningSummary: data_get($toolCall, 'reasoning_summary', []),
             ))
-            ->toArray();
+            ->all();
     }
 
     /**

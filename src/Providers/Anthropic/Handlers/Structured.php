@@ -170,6 +170,7 @@ class Structured
         }
 
         $this->request->addMessage($message);
+        $this->request->resetToolChoice();
         $this->addStep($toolCalls, $tempResponse, $toolResults);
 
         if ($this->canContinue()) {
@@ -247,6 +248,7 @@ class Structured
      */
     protected function addStep(array $toolCalls, Response $tempResponse, array $toolResults = []): void
     {
+        $data = $this->httpResponse->json();
         $isStructuredStep = $this->determineIfStructuredStep($toolCalls, $toolResults);
 
         $this->responseBuilder->addStep(new Step(
@@ -260,6 +262,7 @@ class Structured
             structured: $isStructuredStep ? ($tempResponse->structured ?? []) : [],
             toolCalls: $toolCalls,
             toolResults: $toolResults,
+            raw: $data,
         ));
     }
 
